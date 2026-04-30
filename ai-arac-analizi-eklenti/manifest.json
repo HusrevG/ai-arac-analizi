@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "AI Araç Analizi",
+  "version": "1.1",
+  "description": "Sahibinden araç ilanlarını AI Araç Analizi uygulamasına gönderir ve dış değerleme sitelerine veri taşır.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.sahibinden.com/*",
+    "*://*.arabam.com/*",
+    "*://*.vava.cars/*",
+    "*://*.otoplus.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.sahibinden.com/*",
+        "*://*.arabam.com/*",
+        "*://*.vava.cars/*",
+        "*://*.otoplus.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
