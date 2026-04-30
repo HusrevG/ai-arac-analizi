@@ -1,12 +1,2 @@
-<<<<<<< HEAD
 streamlit
 openai
-requests
-beautifulsoup4
-=======
-streamlit
-openai
-requests
-beautifulsoup4
->>>>>>> 053460ba902b55e2bfd893679ee490124c269f01
-python-dotenv
