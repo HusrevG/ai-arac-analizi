@@ -140,9 +140,9 @@ def dis_degerleme_linkleri():
 
     with col_a:
         st.link_button(
-            "🚘 Trink Sat",
-            "https://www.arabam.com/trink-sat/teklif-al/arac-secimi"
-        )
+    "🚘 Trink Sat",
+    "https://www.arabam.com/trink-sat/teklif-al/arac-secimi"
+)
 
     with col_b:
         st.link_button("🚘 VavaCars", "https://tr.vava.cars/sell/valuation")
