@@ -5,7 +5,7 @@ import urllib.parse
 import streamlit as st
 from openai import OpenAI
 
-APP_VERSION = "2026-05-11-v11.33-trinksat-visual-label-color-fix"
+APP_VERSION = "2026-05-11-v11.40-manuel-duz-fix"
 
 # -----------------------
 # SAYFA AYARLARI
