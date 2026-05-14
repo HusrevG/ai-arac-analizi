@@ -1,24 +1,26 @@
 {
   "manifest_version": 3,
   "name": "AI Araç Analizi",
-  "version": "1.1",
-  "description": "Sahibinden araç ilanlarını AI Araç Analizi uygulamasına gönderir ve dış değerleme sitelerine veri taşır.",
+  "version": "11.31.0",
+  "description": "Sahibinden araç verilerini Streamlit AI Araç Analizi uygulamasına aktarır; Trink Sat ve VavaCars doldurma yardımcıları içerir.",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
-    "*://*.sahibinden.com/*",
-    "*://*.arabam.com/*",
-    "*://*.vava.cars/*",
-    "*://*.otoplus.com/*"
+    "https://www.sahibinden.com/*",
+    "https://*.sahibinden.com/*",
+    "https://www.arabam.com/*",
+    "https://*.arabam.com/*",
+    "https://tr.vava.cars/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "*://*.sahibinden.com/*",
-        "*://*.arabam.com/*",
-        "*://*.vava.cars/*",
-        "*://*.otoplus.com/*"
+        "https://www.sahibinden.com/*",
+        "https://*.sahibinden.com/*",
+        "https://www.arabam.com/*",
+        "https://*.arabam.com/*",
+        "https://tr.vava.cars/*"
       ],
       "js": [
         "content.js"
