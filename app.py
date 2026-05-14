@@ -1,7 +1,11 @@
 import os
 import re
+import json
+import urllib.parse
 import streamlit as st
 from openai import OpenAI
+
+APP_VERSION = "2026-05-11-v11.33-trinksat-visual-label-color-fix"
 
 # -----------------------
 # SAYFA AYARLARI
@@ -28,9 +32,11 @@ section.main {
 """, unsafe_allow_html=True)
 
 st.title("🚗 AI Araç Analizi")
-st.caption("Mobil ikinci el araç analiz sistemi")
+st.caption("PC detay sayfası + mobil manuel ikinci el araç analiz sistemi")
+st.caption(f"Sürüm: {APP_VERSION}")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key) if api_key else None
 
 # -----------------------
 # BASİT PİYASA DB
@@ -39,6 +45,23 @@ PIYASA_DB = {
     "clio5_2020": {"avg": 950000, "min": 880000, "max": 1020000},
     "corolla_2019": {"avg": 920000, "min": 860000, "max": 990000},
 }
+
+HASAR_PARCA_LISTESI = [
+    "Sağ arka çamurluk",
+    "Arka kaput",
+    "Sol arka çamurluk",
+    "Sağ arka kapı",
+    "Sağ ön kapı",
+    "Tavan",
+    "Sol arka kapı",
+    "Sol ön kapı",
+    "Sağ ön çamurluk",
+    "Motor kaputu",
+    "Sol ön çamurluk",
+    "Ön tampon",
+    "Arka tampon",
+]
+
 
 # -----------------------
 # YARDIMCI FONKSİYONLAR
@@ -51,6 +74,7 @@ def temiz_sayi(deger):
         text = str(deger)
         text = text.replace("TL", "")
         text = text.replace("tl", "")
+        text = text.replace("₺", "")
         text = text.replace("KM", "")
         text = text.replace("km", "")
         text = text.replace("cc", "")
@@ -69,32 +93,6 @@ def temiz_sayi(deger):
         return 0
 
 
-def parse_title(text):
-    data = {"yil": 2020, "km": 100000, "vites": "Belirtilmemiş"}
-
-    if not text:
-        return data
-
-    lower_text = text.lower()
-
-    yil = re.search(r"\b(19\d{2}|20\d{2})\b", text)
-    if yil:
-        data["yil"] = int(yil.group())
-
-    km = re.search(r"(\d{2,3}(?:[.,]\d{3})+|\d{4,6})\s*km", lower_text)
-    if km:
-        data["km"] = temiz_sayi(km.group(1))
-
-    if "yarı otomatik" in lower_text or "yari otomatik" in lower_text:
-        data["vites"] = "Yarı Otomatik"
-    elif "manuel" in lower_text:
-        data["vites"] = "Manuel"
-    elif "otomatik" in lower_text:
-        data["vites"] = "Otomatik"
-
-    return data
-
-
 def market_key(baslik, yil):
     text = baslik.lower() if baslik else ""
 
@@ -107,13 +105,32 @@ def market_key(baslik, yil):
     return None
 
 
-def piyasa_fiyat_hesapla(baslik, yil, ref):
+def piyasa_fiyat_hesapla(baslik, yil, ref, fiyat=0):
     key = market_key(baslik, yil)
 
     if key and key in PIYASA_DB:
-        return PIYASA_DB[key]["avg"]
+        db_avg = PIYASA_DB[key]["avg"]
 
-    return int(ref * 0.92) if ref else 0
+        # İlan fiyatı ile DB ortalamasını harmanla
+        if fiyat > 0:
+            return int((db_avg * 0.65) + (fiyat * 0.35))
+
+        return db_avg
+
+    # DB yoksa ilan fiyatını merkez kabul et.
+    if fiyat > 0:
+        fark = abs(ref - fiyat)
+
+        # Referans ile ilan fiyatı birbirine yakınsa
+        # piyasayı ilan fiyatına çok yakın tut.
+        if fark <= fiyat * 0.08:
+            return int((fiyat * 0.85) + (ref * 0.15))
+
+        # Ağır hasarlı / ciddi kusurlu araçlarda
+        # referans etkisini biraz artır.
+        return int((fiyat * 0.70) + (ref * 0.30))
+
+    return ref if ref else 0
 
 
 def karar_ver(fiyat, piyasa):
@@ -132,23 +149,137 @@ def karar_ver(fiyat, piyasa):
         return "❌ UZAK DUR"
 
 
-def dis_degerleme_linkleri():
-    st.write("### 🌐 Dış Değerleme Siteleri")
-    st.caption("Bu butonlar siteleri açar. Form otomatik doldurma işlemini Chrome eklentisi yapar.")
+def firsat_skoru_hesapla(fiyat, yil, km, tramer_var, tramer, agir_hasar, boya_sayisi, degisen_sayisi):
+    fiyat = temiz_sayi(fiyat)
+    yil = temiz_sayi(yil)
+    km = temiz_sayi(km)
+    tramer = temiz_sayi(tramer)
+    boya_sayisi = temiz_sayi(boya_sayisi)
+    degisen_sayisi = temiz_sayi(degisen_sayisi)
 
-    col_a, col_b, col_c = st.columns(3)
+    skor = 100
+    riskler = []
+
+    if km > 250000:
+        skor -= 25
+        riskler.append("Çok yüksek kilometre")
+    elif km > 200000:
+        skor -= 18
+        riskler.append("Yüksek kilometre")
+    elif km > 150000:
+        skor -= 10
+        riskler.append("Orta-yüksek kilometre")
+
+    if yil < 2010:
+        skor -= 18
+        riskler.append("Araç yaşı yüksek")
+    elif yil < 2015:
+        skor -= 10
+        riskler.append("Araç yaşına dikkat edilmeli")
+
+    agir_hasar_text = str(agir_hasar).strip().lower()
+    if agir_hasar_text in ["var", "evet", "true", "1", "ağır hasarlı", "agir hasarli"]:
+        skor -= 35
+        riskler.append("Ağır hasar kaydı var")
+
+    if tramer_var == "Var":
+        if tramer <= 0:
+            skor -= 8
+            riskler.append("Tramer var ama tutar girilmemiş")
+        elif tramer > 150000:
+            skor -= 20
+            riskler.append("Tramer tutarı yüksek")
+        elif tramer > 50000:
+            skor -= 12
+            riskler.append("Tramer tutarı dikkate alınmalı")
+        else:
+            skor -= 5
+            riskler.append("Tramer kaydı var")
+
+    if boya_sayisi >= 5:
+        skor -= 15
+        riskler.append("Boya sayısı yüksek")
+    elif boya_sayisi >= 3:
+        skor -= 8
+        riskler.append("Birkaç parçada boya var")
+    elif boya_sayisi >= 1:
+        skor -= 3
+        riskler.append("Boyalı parça var")
+
+    if degisen_sayisi >= 2:
+        skor -= 20
+        riskler.append("Değişen parça sayısı yüksek")
+    elif degisen_sayisi == 1:
+        skor -= 10
+        riskler.append("Değişen parça var")
+
+    if fiyat > 0 and fiyat < 400000:
+        skor -= 8
+        riskler.append("Fiyat piyasa için olağan dışı düşük olabilir")
+
+    skor = max(0, min(100, skor))
+
+    if skor >= 80:
+        karar = "🟢 Güçlü aday"
+    elif skor >= 60:
+        karar = "🟡 Pazarlıkla değerlendir"
+    else:
+        karar = "🔴 Uzak dur / Çok dikkatli incele"
+
+    return skor, karar, riskler
+
+
+def dis_degerleme_linkleri(arac_payload):
+    payload_text = urllib.parse.quote(json.dumps(arac_payload, ensure_ascii=False))
+
+    yil_degeri = temiz_sayi(arac_payload.get("yil", 0))
+    km_degeri = temiz_sayi(arac_payload.get("km", 0))
+
+    trink_enabled = True
+    trink_reason = ""
+
+    if yil_degeri < 2004:
+        trink_enabled = False
+        trink_reason = "Trink Sat 2004 model öncesi araçlara değerleme vermiyor."
+    elif yil_degeri > 2025:
+        trink_enabled = False
+        trink_reason = "Trink Sat 2026 ve üzeri araçlara değerleme vermiyor."
+
+    vavacars_enabled = True
+    vava_reason = ""
+
+    if yil_degeri < 2009:
+        vavacars_enabled = False
+        vava_reason = "VavaCars 2009 model öncesi araçlara değerleme vermiyor."
+    elif yil_degeri > 2025:
+        vavacars_enabled = False
+        vava_reason = "VavaCars 2026 ve üzeri araçlara değerleme vermiyor."
+    elif km_degeri > 200000:
+        vavacars_enabled = False
+        vava_reason = "VavaCars 200.000 KM üzeri araçları kabul etmiyor."
+
+    trink_url = f"https://www.arabam.com/trink-sat/teklif-al/arac-secimi#ai_arac_data={payload_text}"
+    vavacars_url = f"https://tr.vava.cars/#ai_arac_data={payload_text}"
+
+    col_a, col_b = st.columns(2)
 
     with col_a:
-        st.link_button(
-    "🚘 Trink Sat",
-    "https://www.arabam.com/trink-sat/teklif-al/arac-secimi"
-)
+        if trink_enabled:
+            st.link_button("🚘 Trink Sat", trink_url)
+        else:
+            st.button("🚘 Trink Sat uygun değil", disabled=True)
+
+        if trink_reason:
+            st.caption(trink_reason)
 
     with col_b:
-        st.link_button("🚘 VavaCars", "https://tr.vava.cars/sell/valuation")
+        if vavacars_enabled:
+            st.link_button("🚘 VavaCars", vavacars_url)
+        else:
+            st.button("🚘 VavaCars uygun değil", disabled=True)
 
-    with col_c:
-        st.link_button("🚘 Otoplus", "https://www.otoplus.com/arabam-ne-kadar-eder")
+        if vava_reason:
+            st.caption(vava_reason)
 
 
 def ai_ekspert_raporu(veri):
@@ -171,9 +302,12 @@ Motor Hacmi: {veri["motor_hacmi"]}
 Ağır Hasar Kayıtlı: {veri["agir_hasar"]}
 
 Fiyat: {veri["fiyat"]} TL
-Tramer: {veri["tramer"]} TL
-Boya: {veri["boya"]}
-Değişen: {veri["degisen"]}
+Tramer Durumu: {veri["tramer_var"]}
+Tramer Tutarı: {veri["tramer"]} TL
+Boya Sayısı: {veri["boya"]}
+Boyalı Parçalar: {", ".join(veri["boyali_parcalar"]) if veri["boyali_parcalar"] else "Yok"}
+Değişen Sayısı: {veri["degisen"]}
+Değişen Parçalar: {", ".join(veri["degisen_parcalar"]) if veri["degisen_parcalar"] else "Yok"}
 
 Piyasa Fiyatı: {veri["piyasa"]} TL
 Referans Fiyat: {veri["ref"]} TL
@@ -181,12 +315,22 @@ Risk Skoru: {veri["risk"]}/100
 Karar: {veri["karar"]}
 
 Fırsat Durumu: {veri["firsat"]}
-Fırsat Oranı: %{veri["firsat_orani"]:.1f}
+Fırsat Oranı: %{veri["firsat_orani"]:+.1f}
+Fırsat Skoru: {veri["firsat_skor"]}/100
+Fırsat Skoru Kararı: {veri["firsat_skor_karar"]}
+Fırsat Skoru Riskleri: {", ".join(veri["firsat_riskler"]) if veri["firsat_riskler"] else "Belirgin ek risk yok"}
 
 Önemli not:
-- Boya, değişen ve tramer bilgisi boşsa bunu kesin bilgi gibi yorumlama.
+- Tramer, boya ve değişen bilgileri kullanıcı tarafından manuel girilmiştir.
+- Kullanıcı boş ya da 0 girdiyse bunu kesin kusursuzluk olarak yorumlama; yine ekspertiz öner.
 - Ağır hasar kayıtlı bilgisi "Hayır" ise bunu olumlu kabul et.
 - Araç yaşı, km, yakıt tipi, motor hacmi ve fiyatı birlikte değerlendir.
+- Pahalı/fırsat yorumunu piyasa fiyatı ve referans fiyatla tutarlı yap.
+- İlan fiyatını tamamen yok sayma.
+- Ağır hasar, çok yüksek tramer, çok yüksek km veya ciddi değişen yoksa fiyatı aşırı düşük değerlendirme.
+- Normal piyasa koşullarında alım bandını genelde ilan fiyatının %90-%100 aralığında tut.
+- 950 bin TL civarı normal bir araç için sebepsiz şekilde 800-850 bin önerme.
+- Fiyat yorumunda gerçek Türkiye ikinci el piyasasını baz al.
 
 Şu formatta kısa, net ve kullanıcı dostu cevap ver:
 
@@ -196,6 +340,9 @@ Fırsat Oranı: %{veri["firsat_orani"]:.1f}
 4. Pazarlık Önerisi
 5. Net Karar: AL / BEKLE / UZAK DUR
 """
+
+    if client is None:
+        return "AI analiz hatası: OPENAI_API_KEY tanımlı değil."
 
     try:
         res = client.chat.completions.create(
@@ -223,10 +370,6 @@ otomatik_yil = temiz_sayi(query_params.get("yil", 2020))
 otomatik_km = temiz_sayi(query_params.get("km", 100000))
 otomatik_vites = query_params.get("vites", "Belirtilmemiş")
 
-otomatik_tramer = temiz_sayi(query_params.get("tramer", 0))
-otomatik_boya = temiz_sayi(query_params.get("boya", 0))
-otomatik_degisen = temiz_sayi(query_params.get("degisen", 0))
-
 otomatik_marka = query_params.get("marka", "")
 otomatik_seri = query_params.get("seri", "")
 otomatik_model = query_params.get("model", "")
@@ -242,6 +385,11 @@ if otomatik_yil <= 0:
 if otomatik_km <= 0:
     otomatik_km = 100000
 
+# Başlık ekranda gösterilmez; analiz için arkada oluşturulur.
+baslik = f"{otomatik_marka} {otomatik_seri} {otomatik_model} {otomatik_yil}".strip()
+if not baslik:
+    baslik = otomatik_baslik
+
 # -----------------------
 # FORM
 # -----------------------
@@ -253,19 +401,6 @@ ilan_linki = st.text_input(
 
 if ilan_linki:
     st.info("Link algılandı. Eklenti ile gelen bilgiler otomatik doldurulduysa doğrudan analiz alınabilir.")
-
-baslik = st.text_input(
-    "İlan Başlığı",
-    value=otomatik_baslik,
-    placeholder="Örnek: 2020 Renault Clio 1.5 Blue dCi Otomatik 85.000 km"
-)
-
-if st.button("Başlıktan Yıl / KM / Vites Doldur"):
-    parsed = parse_title(baslik)
-    st.session_state["yil"] = parsed["yil"]
-    st.session_state["km"] = parsed["km"]
-    st.session_state["vites"] = parsed["vites"]
-    st.rerun()
 
 st.write("### 🔧 Araç Teknik Bilgileri")
 
@@ -290,7 +425,7 @@ with col1:
         "Yıl",
         min_value=1990,
         max_value=2026,
-        value=st.session_state.get("yil", otomatik_yil)
+        value=otomatik_yil
     )
 
 with col2:
@@ -298,7 +433,7 @@ with col2:
         "KM",
         min_value=0,
         max_value=1000000,
-        value=st.session_state.get("km", otomatik_km),
+        value=otomatik_km,
         step=1000
     )
 
@@ -310,7 +445,7 @@ if otomatik_vites not in vites_listesi:
 vites = st.selectbox(
     "Vites",
     vites_listesi,
-    index=vites_listesi.index(st.session_state.get("vites", otomatik_vites))
+    index=vites_listesi.index(otomatik_vites)
 )
 
 fiyat_text = st.text_input(
@@ -321,86 +456,172 @@ fiyat_text = st.text_input(
 
 fiyat = temiz_sayi(fiyat_text)
 
-st.write("### 🧾 Hasar Bilgileri")
+st.write("### 🧾 Hasar / Tramer Bilgileri")
+st.caption("Hasar bilgileri manuel seçilir. Sistem boya/değişen/tramer verisi uydurmaz.")
+
+tramer_var = st.selectbox(
+    "Tramer Kaydı",
+    ["Yok", "Var"]
+)
 
 tramer_text = st.text_input(
-    "Tramer Tutarı",
-    value=str(otomatik_tramer) if otomatik_tramer else "",
-    placeholder="Örnek: 3000"
+    "Toplam Tramer Tutarı",
+    value="",
+    placeholder="Örnek: 25000"
 )
 
 tramer = temiz_sayi(tramer_text)
 
-boya = st.number_input(
-    "Boya Sayısı",
-    min_value=0,
-    max_value=20,
-    value=otomatik_boya
+boyali_parcalar = st.multiselect(
+    "Boyalı Parçalar",
+    HASAR_PARCA_LISTESI,
+    default=[]
 )
 
-degisen = st.number_input(
-    "Değişen Sayısı",
-    min_value=0,
-    max_value=20,
-    value=otomatik_degisen
+degisen_parcalar = st.multiselect(
+    "Değişen Parçalar",
+    HASAR_PARCA_LISTESI,
+    default=[]
 )
+
+boya = len(boyali_parcalar)
+degisen = len(degisen_parcalar)
+
+ortak_parcalar = sorted(set(boyali_parcalar) & set(degisen_parcalar))
+if ortak_parcalar:
+    st.error("Aynı parça hem boyalı hem değişen seçilmiş. Lütfen düzelt: " + ", ".join(ortak_parcalar))
+
+if "Tavan" in degisen_parcalar:
+    st.warning("Tavan değişen seçildi. Bu yüksek riskli kabul edilir.")
+
+st.caption(f"Seçilen boya sayısı: {boya} | Seçilen değişen sayısı: {degisen}")
+
+
+
 
 # -----------------------
 # ANALİZ
 # -----------------------
-auto_run = bool("ilan" in query_params and baslik and fiyat > 0)
+auto_run = False  # Manuel hasar bilgileri girileceği için otomatik analiz kapalı
 
-if st.button("🚀 Hızlı Analiz") or auto_run:
-    if not baslik:
-        st.warning("Önce ilan başlığını gir.")
-        st.stop()
-
+if st.button("🚀 Hızlı Analiz"):
     if fiyat <= 0:
         st.warning("Önce ilan fiyatını gir.")
         st.stop()
 
+    if ortak_parcalar:
+        st.warning("Aynı parça hem boyalı hem değişen olamaz. Önce hasar seçimlerini düzelt.")
+        st.stop()
+
     st.success("Analiz başlatılıyor...")
 
-    ref = fiyat
-    ref -= (2026 - yil) * 5000
+    # -------------------------------------------------
+    # GERÇEKÇİ REFERANS / PİYASA HESABI
+    # -------------------------------------------------
 
-    if km > 200000:
+    ref = fiyat
+
+    # Yaş etkisi
+    yas = max(0, 2026 - yil)
+
+    if yas >= 15:
+        ref -= 90000
+    elif yas >= 10:
+        ref -= 60000
+    elif yas >= 5:
+        ref -= 25000
+
+    # KM etkisi
+    if km > 300000:
+        ref -= 120000
+    elif km > 250000:
+        ref -= 90000
+    elif km > 200000:
         ref -= 60000
     elif km > 150000:
         ref -= 30000
     elif km < 80000:
-        ref += 20000
+        ref += 25000
+    elif km < 50000:
+        ref += 45000
 
-    ref -= int(tramer * 0.3)
-    ref -= int(boya * 4000)
-    ref -= int(degisen * 15000)
+    # Tramer etkisi
+    if tramer_var == "Var" and tramer > 0:
+        if tramer > 300000:
+            ref -= int(tramer * 0.40)
+        elif tramer > 150000:
+            ref -= int(tramer * 0.35)
+        elif tramer > 50000:
+            ref -= int(tramer * 0.25)
+        else:
+            ref -= int(tramer * 0.15)
+
+    # Boya / değişen etkisi
+    ref -= int(boya * 3500)
+    ref -= int(degisen * 18000)
+
+    # Ağır hasar ciddi etki etsin
+    if agir_hasar.strip().lower() in ["evet", "var", "ağır hasarlı", "agir hasarli"]:
+        ref -= 120000
+
+    # Referans fiyat ilan fiyatından kopup saçmalamasın.
+    # Ağır kusur yoksa minimum %90 bandında kalsın.
+    minimum_ref = int(fiyat * 0.90)
+
+    agir_kusur = (
+        degisen >= 2 or
+        tramer >= 150000 or
+        agir_hasar.strip().lower() in ["evet", "var", "ağır hasarlı", "agir hasarli"]
+    )
+
+    if agir_kusur:
+        minimum_ref = int(fiyat * 0.78)
+
+    if ref < minimum_ref:
+        ref = minimum_ref
 
     if ref < 0:
         ref = 0
 
-    piyasa = piyasa_fiyat_hesapla(baslik, yil, ref)
+    piyasa = piyasa_fiyat_hesapla(baslik, yil, ref, fiyat)
 
-    alim_alt = int(ref * 0.92)
-    alim_ust = int(ref * 0.97)
+    # Gerçekçi alım/satım bandı
+    if agir_kusur:
+        alim_alt = int(ref * 0.92)
+    else:
+        alim_alt = int(ref * 0.96)
+
+    alim_ust = int(ref * 1.00)
 
     sat_alt = int(ref * 1.00)
-    sat_ust = int(ref * 1.05)
+    sat_ust = int(ref * 1.06)
 
-    fark = fiyat - ref
-    yuzde = (fark / ref) * 100 if ref else 0
+    referans_farki = fiyat - ref
+    referans_yuzde = (referans_farki / ref) * 100 if ref else 0
+
+    piyasa_farki = fiyat - piyasa
+    piyasa_yuzde = (piyasa_farki / piyasa) * 100 if piyasa else 0
 
     pazarlik = max(0, fiyat - alim_ust)
     pot_kar = sat_alt - fiyat
 
     risk = 0
+
     if km > 200000:
         risk += 20
-    if tramer > 50000:
-        risk += 20
+
+    if tramer_var == "Var":
+        if tramer > 50000:
+            risk += 20
+        else:
+            risk += 10
+
     if degisen > 0:
         risk += 20
+
     if agir_hasar.strip().lower() in ["evet", "var", "ağır hasarlı", "agir hasarli"]:
         risk += 25
+
     if fiyat > sat_ust:
         risk += 20
 
@@ -408,29 +629,66 @@ if st.button("🚀 Hızlı Analiz") or auto_run:
 
     karar = karar_ver(fiyat, piyasa)
 
-    # -----------------------
-    # FIRSAT ANALİZİ
-    # -----------------------
-    firsat_orani = ((piyasa - fiyat) / piyasa) * 100 if piyasa else 0
+    firsat_orani = piyasa_yuzde
 
-    if firsat_orani >= 12:
+    if firsat_orani <= -12:
         firsat = "🔥 KAÇIRMA"
-    elif firsat_orani >= 5:
+    elif firsat_orani <= -5:
         firsat = "✅ FIRSAT"
-    elif firsat_orani >= -5:
+    elif firsat_orani <= 5:
         firsat = "⚖️ NORMAL"
     else:
         firsat = "❌ PAHALI"
 
+    firsat_skor, firsat_skor_karar, firsat_riskler = firsat_skoru_hesapla(
+        fiyat=fiyat,
+        yil=yil,
+        km=km,
+        tramer_var=tramer_var,
+        tramer=tramer,
+        agir_hasar=agir_hasar,
+        boya_sayisi=boya,
+        degisen_sayisi=degisen
+    )
+
+    guven = 100
+    if km > 200000:
+        guven -= 20
+    if boya >= 3:
+        guven -= 10
+    if degisen > 0:
+        guven -= 15
+    if tramer_var == "Var" and tramer <= 0:
+        guven -= 10
+    if not fiyat:
+        guven -= 20
+    guven = max(0, min(100, guven))
+
     st.divider()
     st.subheader("📊 Analiz Sonucu")
 
-    st.info(f"Fırsat Durumu: {firsat} ({firsat_orani:.1f}%)")
+    # Tutarlı karar kartı: önce fiyat/piyasa pahalı mı, sonra fırsat skoru.
+    if firsat_orani > 5:
+        st.warning("⚠️ PAHALI / PAZARLIK GEREKİR")
+    elif firsat_skor >= 80:
+        st.success("🔥 GÜÇLÜ ADAY")
+    elif firsat_skor >= 60:
+        st.warning("⚠️ PAZARLIKLA ALINABİLİR")
+    else:
+        st.error("❌ UZAK DUR")
+
+    if firsat_orani > 30:
+        st.error("🚨 AŞIRI PAHALI - PİYASADAN ÇOK YUKARI")
+    elif firsat_orani < -20:
+        st.success("💣 AŞIRI FIRSAT - PİYASA ALTI")
+
+    st.info(f"Fırsat Durumu: {firsat} ({firsat_orani:+.1f}%)")
     st.success(f"Karar: {karar}")
 
     st.metric("Piyasa Fiyatı", f"{piyasa:,.0f} TL")
     st.metric("Referans Fiyat", f"{ref:,.0f} TL")
-    st.metric("Fiyat Farkı", f"{fark:,.0f} TL ({yuzde:.1f}%)")
+    st.metric("Piyasa Farkı", f"{piyasa_farki:+,.0f} TL ({piyasa_yuzde:+.1f}%)")
+    st.metric("Referans Farkı", f"{referans_farki:+,.0f} TL ({referans_yuzde:+.1f}%)")
 
     st.write("### 💰 Alım / Satım Bandı")
     st.write(f"Alım Bandı: {alim_alt:,.0f} - {alim_ust:,.0f} TL")
@@ -446,6 +704,18 @@ if st.button("🚀 Hızlı Analiz") or auto_run:
     st.progress(risk)
     st.write(f"{risk}/100")
 
+    st.write("### 🧠 Veri Güven Skoru")
+    st.metric("Veri Güven Skoru", f"{guven}/100")
+
+    st.write("### 🎯 Fırsat Skoru")
+    st.metric("Fırsat Skoru", f"{firsat_skor}/100")
+    st.success(firsat_skor_karar)
+
+    if firsat_riskler:
+        st.warning("Dikkat edilmesi gerekenler:")
+        for r in firsat_riskler:
+            st.write(f"- {r}")
+
     veri = {
         "marka": marka,
         "seri": seri,
@@ -455,6 +725,8 @@ if st.button("🚀 Hızlı Analiz") or auto_run:
         "motor_gucu": motor_gucu,
         "motor_hacmi": motor_hacmi,
         "agir_hasar": agir_hasar,
+        "renk": query_params.get("renk", ""),
+        "tramer_var": tramer_var,
         "baslik": baslik,
         "yil": yil,
         "km": km,
@@ -462,19 +734,53 @@ if st.button("🚀 Hızlı Analiz") or auto_run:
         "fiyat": fiyat,
         "tramer": tramer,
         "boya": boya,
+        "boyali_parcalar": boyali_parcalar,
         "degisen": degisen,
+        "degisen_parcalar": degisen_parcalar,
         "piyasa": piyasa,
         "ref": ref,
         "risk": risk,
         "karar": karar,
         "firsat": firsat,
-        "firsat_orani": firsat_orani
+        "firsat_orani": firsat_orani,
+        "firsat_skor": firsat_skor,
+        "firsat_skor_karar": firsat_skor_karar,
+        "firsat_riskler": firsat_riskler,
     }
 
     with st.spinner("🤖 AI ekspert raporu hazırlanıyor..."):
         ai_rapor = ai_ekspert_raporu(veri)
 
+    st.write("### ⚡ Hızlı Özet")
+    ai_rapor_upper = ai_rapor.upper()
+    if "UZAK DUR" in ai_rapor_upper:
+        st.error("AI: UZAK DUR")
+    elif "AL" in ai_rapor_upper:
+        st.success("AI: ALINABİLİR")
+    else:
+        st.warning("AI: KARARSIZ / DETAY İNCELE")
+
     st.subheader("🤖 AI Ekspert Raporu")
     st.write(ai_rapor)
 
-    dis_degerleme_linkleri()
+    arac_payload = {
+        "ilan": ilan_linki,
+        "marka": marka,
+        "seri": seri,
+        "model": model,
+        "yil": str(yil),
+        "km": str(km),
+        "yakit": yakit,
+        "vites": vites,
+        "kasa": kasa,
+        "motor_gucu": motor_gucu,
+        "motor_hacmi": motor_hacmi,
+        "agir_hasar": agir_hasar,
+        "renk": query_params.get("renk", ""),
+        "tramer_var": tramer_var,
+        "tramer": str(tramer),
+        "boyali_parcalar": boyali_parcalar,
+        "degisen_parcalar": degisen_parcalar,
+    }
+
+    dis_degerleme_linkleri(arac_payload)
