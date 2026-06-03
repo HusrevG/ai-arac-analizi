@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    font-family: Arial, sans-serif;
+  }
+  .damage-card {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #d1d5db;
+    border-radius: 18px;
+    background: #fffdf0;
+    padding: 12px 12px 10px 12px;
+  }
+  .legend {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: #374151;
+    margin-bottom: 8px;
+  }
+  .swatch {
+    display: inline-block;
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    border: 1px solid #111827;
+    vertical-align: -3px;
+    margin-right: 5px;
+  }
+  .map-wrap { display: flex; justify-content: center; }
+  svg { width: min(100%, 430px); height: auto; display: block; }
+  .outer { fill: #d9d9d9; stroke: #d1d5db; stroke-width: 10; opacity:.95; }
+  .glass { fill: #f8fafc; stroke: #d1d5db; stroke-width: 4; opacity: .95; pointer-events: none; }
+  .wheel { fill: #d6d6d6; stroke:#f3f4f6; stroke-width:5; opacity: 1; pointer-events: none; }
+  .part path { stroke: #f3f4f6; stroke-width: 5; cursor: pointer; transition: filter .12s ease, opacity .12s ease; }
+  .part:hover path { filter: drop-shadow(0 0 5px rgba(0,0,0,.28)); opacity: .92; }
+  .part-label { font-weight: 700; pointer-events: none; font-family: Arial, sans-serif; user-select: none; }
+  .front-back { fill: #9ca3af; font-size: 13px; font-weight: 800; font-family: Arial, sans-serif; }
+  .hint { text-align:center; font-size:12px; color:#6b7280; margin-top:7px; }
+  .error-box { background:#fee2e2; color:#7f1d1d; border:1px solid #ef4444; padding:10px; border-radius:10px; font-size:13px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const PARTS = [
+  {name:"Ön tampon", d:"M226 52 L394 52 L410 86 L210 86 Z", x:310, y:72, label:"Ön tampon", fs:13},
+  {name:"Motor kaputu", d:"M206 98 C232 86 388 86 414 98 L400 238 C370 248 250 248 220 238 Z", x:310, y:166, label:"Motor kaputu", fs:14},
+
+  {name:"Sol ön çamurluk", d:"M124 100 L170 112 C188 146 202 202 212 256 L184 284 L122 262 C104 212 102 150 124 100 Z", x:158, y:194, label:"Sol ön\nçamurluk", fs:11},
+  {name:"Sağ ön çamurluk", d:"M496 100 C518 150 516 212 498 262 L436 284 L408 256 C418 202 432 146 450 112 Z", x:462, y:194, label:"Sağ ön\nçamurluk", fs:11},
+
+  {name:"Sol ön kapı", d:"M116 286 L188 308 L190 430 L116 398 Z", x:153, y:360, label:"Sol ön\nkapı", fs:12},
+  {name:"Sağ ön kapı", d:"M432 308 L504 286 L504 398 L430 430 Z", x:467, y:360, label:"Sağ ön\nkapı", fs:12},
+
+  {name:"Tavan", d:"M218 260 L402 260 C410 330 410 500 402 560 L218 560 C210 500 210 330 218 260 Z", x:310, y:410, label:"Tavan", fs:15},
+
+  {name:"Sol arka kapı", d:"M116 422 L190 454 L188 576 L116 598 Z", x:153, y:512, label:"Sol arka\nkapı", fs:12},
+  {name:"Sağ arka kapı", d:"M430 454 L504 422 L504 598 L432 576 Z", x:467, y:512, label:"Sağ arka\nkapı", fs:12},
+
+  {name:"Sol arka çamurluk", d:"M122 622 L184 600 L212 628 C202 682 188 738 170 772 L124 784 C102 734 104 672 122 622 Z", x:158, y:700, label:"Sol arka\nçamurluk", fs:11},
+  {name:"Sağ arka çamurluk", d:"M436 600 L498 622 C516 672 518 734 496 784 L450 772 C432 738 418 682 408 628 Z", x:462, y:700, label:"Sağ arka\nçamurluk", fs:11},
+
+  {name:"Arka kaput", d:"M220 582 C250 572 370 572 400 582 L414 722 C388 734 232 734 206 722 Z", x:310, y:656, label:"Arka kaput", fs:14},
+  {name:"Arka tampon", d:"M210 736 L410 736 L394 770 L226 770 Z", x:310, y:754, label:"Arka tampon", fs:13}
+];
+
+let currentState = {};
+let lastArgs = null;
+
+function sendMessage(type, data) {
+  const payload = Object.assign({ isStreamlitMessage: true, type }, data || {});
+  window.parent.postMessage(payload, "*");
+}
+
+function setFrameHeight() {
+  const h = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, 820);
+  sendMessage("streamlit:setFrameHeight", { height: h });
+}
+
+function setComponentValue(value) {
+  sendMessage("streamlit:setComponentValue", { value });
+}
+
+function colorFor(status) {
+  if (status === "Boyalı") return "#2563eb";
+  if (status === "Değişen") return "#dc2626";
+  return "#eef2f7";
+}
+
+function textColorFor(status) {
+  return (status === "Boyalı" || status === "Değişen") ? "#ffffff" : "#111827";
+}
+
+function nextStatus(status) {
+  if (status === "Orijinal" || !status) return "Boyalı";
+  if (status === "Boyalı") return "Değişen";
+  return "Orijinal";
+}
+
+function esc(s) {
+  return String(s || "").replace(/[&<>'"]/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;"}[c]));
+}
+
+function labelSvg(part) {
+  const lines = String(part.label).split("\n");
+  const color = textColorFor(currentState[part.name] || "Orijinal");
+  if (lines.length === 1) {
+    return `<text x="${part.x}" y="${part.y}" fill="${color}" class="part-label" font-size="${part.fs}" text-anchor="middle" dominant-baseline="middle">${esc(lines[0])}</text>`;
+  }
+  const y = part.y - 8;
+  const spans = lines.map((line, i) => `<tspan x="${part.x}" dy="${i === 0 ? 0 : 16}">${esc(line)}</tspan>`).join("");
+  return `<text x="${part.x}" y="${y}" fill="${color}" class="part-label" font-size="${part.fs}" text-anchor="middle">${spans}</text>`;
+}
+
+function partSvg(part) {
+  const fill = colorFor(currentState[part.name] || "Orijinal");
+  return `<g class="part" data-part="${esc(part.name)}" role="button" tabindex="0" aria-label="${esc(part.name)}">
+    <path d="${part.d}" fill="${fill}"></path>
+    ${labelSvg(part)}
+  </g>`;
+}
+
+function attachHandlers() {
+  document.querySelectorAll(".part").forEach(el => {
+    const handle = () => {
+      const partName = el.dataset.part;
+      currentState[partName] = nextStatus(currentState[partName] || "Orijinal");
+      render({ state: currentState });
+      setComponentValue({ part: partName, nonce: String(Date.now()) + "_" + Math.random().toString(16).slice(2) });
+    };
+    el.addEventListener("click", handle);
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        handle();
+      }
+    });
+  });
+}
+
+function render(args) {
+  try {
+    lastArgs = args || lastArgs || {};
+    currentState = Object.assign({}, (lastArgs && lastArgs.state) ? lastArgs.state : currentState);
+    const panels = PARTS.filter(p => p.name !== "Arka tampon").map(partSvg).join("");
+    const rearBumperPanel = PARTS.filter(p => p.name === "Arka tampon").map(partSvg).join("");
+    document.getElementById("root").innerHTML = `
+    <div class="damage-card">
+      <div class="legend">
+        <span><span class="swatch" style="background:#eef2f7"></span>Orijinal</span>
+        <span><span class="swatch" style="background:#2563eb"></span>Boyalı</span>
+        <span><span class="swatch" style="background:#dc2626"></span>Değişen</span>
+      </div>
+      <div class="map-wrap">
+        <svg viewBox="0 0 620 820" role="img" aria-label="13 parçalı araç ekspertiz şeması" xmlns="http://www.w3.org/2000/svg">
+          <text x="310" y="24" class="front-back" text-anchor="middle">ÖN</text>
+
+          <rect class="wheel" x="74" y="142" width="72" height="92" rx="36"></rect>
+          <rect class="wheel" x="474" y="142" width="72" height="92" rx="36"></rect>
+          <rect class="wheel" x="74" y="586" width="72" height="92" rx="36"></rect>
+          <rect class="wheel" x="474" y="586" width="72" height="92" rx="36"></rect>
+
+          <path class="outer" d="M216 34 C260 18 360 18 404 34 L468 98 C506 152 526 248 526 410 C526 572 506 668 468 722 L404 786 C360 802 260 802 216 786 L152 722 C114 668 94 572 94 410 C94 248 114 152 152 98 Z"></path>
+          <path class="glass" d="M232 252 L388 252 L402 366 L218 366 Z"></path>
+          <path class="glass" d="M218 454 L402 454 L388 568 L232 568 Z"></path>
+          <rect x="292" y="252" width="36" height="316" fill="#cfd6df" opacity=".55" pointer-events="none"></rect>
+
+          ${panels}
+
+          <path d="M226 42 L394 42" stroke="#cfd6df" stroke-width="9" stroke-linecap="round" pointer-events="none"></path>
+
+          ${rearBumperPanel}
+
+          <path d="M226 778 L394 778" stroke="#cfd6df" stroke-width="9" stroke-linecap="round" pointer-events="none"></path>
+          <text x="310" y="808" class="front-back" text-anchor="middle">ARKA</text>
+        </svg>
+      </div>
+      <div class="hint">Tıklama URL değiştirmez; seçimler Python session_state içinde tutulur.</div>
+    </div>`;
+    attachHandlers();
+    setTimeout(setFrameHeight, 0);
+  } catch (err) {
+    document.getElementById("root").innerHTML = `<div class="error-box">Hasar şeması render hatası: ${esc(err && err.message ? err.message : err)}</div>`;
+    setTimeout(setFrameHeight, 0);
+  }
+}
+
+window.addEventListener("error", (ev) => {
+  const msg = ev.message || "Bilinmeyen JS hatası";
+  const root = document.getElementById("root");
+  if (root && !root.innerHTML.trim()) {
+    root.innerHTML = `<div class="error-box">Hasar şeması JS hatası: ${esc(msg)}</div>`;
+  }
+  setTimeout(setFrameHeight, 0);
+});
+
+window.addEventListener("message", (event) => {
+  if (!event.data || !event.data.isStreamlitMessage) return;
+  if (event.data.type === "streamlit:render") {
+    render(event.data.args || {});
+    sendMessage("streamlit:componentReady", { apiVersion: 1 });
+  }
+});
+
+// Kritik düzeltme: Streamlit render mesajı gecikir veya hiç gelmezse boş alan kalmasın.
+// Önce varsayılan araç şemasını basıyoruz; render mesajı gelirse renk/state tekrar güncellenir.
+render({ state: {} });
+sendMessage("streamlit:componentReady", { apiVersion: 1 });
+setTimeout(setFrameHeight, 50);
+</script>
+</body>
+</html>
